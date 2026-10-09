@@ -1,0 +1,8 @@
+target/
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+.agent-work/
+.DS_Store
