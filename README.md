@@ -1,3 +1,1 @@
-# 
-
-Visual Embedded Linux Studio.
+# KernelCanvas
