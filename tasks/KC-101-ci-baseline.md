@@ -4,8 +4,8 @@
 
 - Milestone: M0 | Priority: P0
 - Role: `agents/INFRA.md`
-- Status: READY (unassigned)
-- Owner: UNASSIGNED | Reviewer: UNASSIGNED
+- Status: IN_PROGRESS
+- Owner: local-codex-infra-01 | Reviewer: local-claude-review-01
 - Dependencies: Rust workspace + React app present on `main`; inspect actual source before implementation.
 - Product requirement: foundation infrastructure, not a new Yocto feature.
 
@@ -38,3 +38,13 @@ Maintainer authorizes GitHub pushes and PR creation. No auth token/config change
 
 ## Handover
 Task, branch, PR link, exact jobs/steps, environment/tool versions, local checks status, CI URL/status, risks, reviewer questions, next task.
+
+## Active Assignment
+
+- GitHub issue: https://github.com/taovuokko/KernelCanvas/issues/1
+- Coordinator: taovuokko
+- Implementation agent: local-codex-infra-01
+- Independent reviewer: local-claude-review-01
+- Assigned branch: agent/KC-101-ci-baseline
+- Maintainer authorizes implementation within the task's allowed paths.
+- Push, PR creation, merge, and unrelated changes require separate authorization.
