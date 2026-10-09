@@ -5,9 +5,9 @@
 - Milestone: M0 (development automation)
 - Priority: P0
 - Agent role: `agents/ORCHESTRATOR.md`
-- State: READY / UNASSIGNED — maintainer to mark IN_PROGRESS when assigning
-- Owner: UNASSIGNED
-- Reviewer: UNASSIGNED (must differ from owner)
+- State: IN_PROGRESS
+- Owner: local-codex-orchestrator-01
+- Reviewer: local-claude-review-02
 - Depends on: merged foundation documentation. Independent of KC-101 CI changes; do not edit CI files.
 
 ## Goal
