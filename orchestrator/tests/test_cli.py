@@ -57,6 +57,17 @@ class CliTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("local development-task scheduler", result.stdout)
 
+    def test_argparse_usage_error_exits_with_code_2(self) -> None:
+        result = subprocess.run(
+            [sys.executable, "-m", "orchestrator", "claim"],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(ExitCode.USAGE, result.returncode)
+        self.assertIn("usage:", result.stderr)
+
     def test_missing_database_does_not_create_file(self) -> None:
         code, _, stderr = self.run_cli("status")
         self.assertEqual(ExitCode.NOT_FOUND, code)
@@ -161,6 +172,21 @@ class CliTests(unittest.TestCase):
             ExitCode.LEASE_ERROR,
             self.run_cli("heartbeat", "KC-104", "--worker", "intruder")[0],
         )
+
+    def test_claim_unknown_task_id_returns_not_found(self) -> None:
+        self.assertEqual(ExitCode.SUCCESS, self.run_cli("init")[0])
+        code, _, stderr = self.run_cli(
+            "claim",
+            "KC-404",
+            "--worker",
+            "worker",
+            "--reviewer",
+            "reviewer",
+            "--lease-seconds",
+            "60",
+        )
+        self.assertEqual(ExitCode.NOT_FOUND, code)
+        self.assertIn("task not found: KC-404", stderr)
 
     def test_unsupported_schema_maps_to_database_error(self) -> None:
         self.db_path.parent.mkdir(parents=True)

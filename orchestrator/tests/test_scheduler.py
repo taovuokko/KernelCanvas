@@ -21,6 +21,7 @@ from orchestrator.models import (
     WrongWorkerError,
 )
 from orchestrator.scheduler import (
+    MAX_LEASE_SECONDS,
     add_task,
     claim_task,
     get_history,
@@ -144,6 +145,38 @@ class SchedulerTests(unittest.TestCase):
         self.assertFalse(self.connection.in_transaction)
         self.assertEqual(TaskState.QUEUED, get_task(self.connection, "KC-104").state)
 
+    def test_oversized_lease_duration_is_rejected_without_overflow(self) -> None:
+        self.add()
+        for seconds in (MAX_LEASE_SECONDS + 1, 10**100):
+            with self.subTest(seconds=seconds), self.assertRaisesRegex(
+                InvalidInputError, "lease seconds"
+            ):
+                claim_task(
+                    self.connection,
+                    "KC-104",
+                    "worker",
+                    "reviewer",
+                    seconds,
+                    now_fn=self.clock,
+                )
+        self.assertFalse(self.connection.in_transaction)
+        self.assertEqual(TaskState.QUEUED, get_task(self.connection, "KC-104").state)
+
+    def test_claim_rejects_expiry_outside_datetime_range(self) -> None:
+        self.add()
+        self.clock.value = datetime.max.replace(tzinfo=timezone.utc)
+        with self.assertRaisesRegex(InvalidInputError, "datetime range"):
+            claim_task(
+                self.connection,
+                "KC-104",
+                "worker",
+                "reviewer",
+                1,
+                now_fn=self.clock,
+            )
+        self.assertFalse(self.connection.in_transaction)
+        self.assertEqual(TaskState.QUEUED, get_task(self.connection, "KC-104").state)
+
     def test_second_claim_is_rejected_without_partial_write(self) -> None:
         self.add()
         self.claim()
@@ -169,6 +202,49 @@ class SchedulerTests(unittest.TestCase):
         )
         self.assertEqual(original.expires_at + timedelta(seconds=30), renewed.expires_at)
         self.assertEqual(self.clock.value, renewed.heartbeat_at)
+
+    def test_heartbeat_rejects_oversized_stored_duration(self) -> None:
+        self.add()
+        self.claim()
+        oversized_expiry = self.clock.value + timedelta(
+            seconds=MAX_LEASE_SECONDS + 1
+        )
+        self.connection.execute(
+            "UPDATE leases SET expires_at = ? WHERE task_id = ?",
+            (oversized_expiry.isoformat(), "KC-104"),
+        )
+
+        with self.assertRaisesRegex(InvalidInputError, "stored lease duration"):
+            heartbeat_task(
+                self.connection, "KC-104", "worker", now_fn=self.clock
+            )
+        self.assertFalse(self.connection.in_transaction)
+
+    def test_heartbeat_rejects_expiry_outside_datetime_range(self) -> None:
+        self.add()
+        self.clock.value = datetime.max.replace(tzinfo=timezone.utc) - timedelta(
+            seconds=60
+        )
+        self.claim()
+        self.clock.advance(30)
+
+        with self.assertRaisesRegex(InvalidInputError, "datetime range"):
+            heartbeat_task(
+                self.connection, "KC-104", "worker", now_fn=self.clock
+            )
+        self.assertFalse(self.connection.in_transaction)
+
+    def test_timezone_naive_clock_is_rejected(self) -> None:
+        with self.assertRaisesRegex(InvalidInputError, "timezone-aware"):
+            add_task(
+                self.connection,
+                "KC-NAIVE",
+                self.task_file,
+                "https://github.com/example/repo/issues/105",
+                now_fn=lambda: datetime(2026, 1, 2, 3, 4, 5),
+            )
+        with self.assertRaises(TaskNotFoundError):
+            get_task(self.connection, "KC-NAIVE")
 
     def test_wrong_worker_and_expired_heartbeat_are_rejected(self) -> None:
         self.add()

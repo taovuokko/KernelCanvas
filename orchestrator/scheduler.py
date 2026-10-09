@@ -28,6 +28,8 @@ from .models import (
 )
 
 Clock = Callable[[], datetime]
+MAX_LEASE_SECONDS = 7 * 24 * 60 * 60
+MAX_LEASE_DURATION = timedelta(seconds=MAX_LEASE_SECONDS)
 
 
 def utc_now() -> datetime:
@@ -108,11 +110,9 @@ def claim_task(
     reviewer = _required_text(reviewer, "reviewer")
     if worker == reviewer:
         raise InvalidInputError("worker and reviewer must be different")
-    if lease_seconds <= 0:
-        raise InvalidInputError("lease seconds must be greater than zero")
-
+    duration = _validate_requested_lease_duration(lease_seconds)
     now = _now(now_fn)
-    expires = now + timedelta(seconds=lease_seconds)
+    expires = _lease_expiry(now, duration)
     token = uuid.uuid4().hex
 
     connection.execute("BEGIN IMMEDIATE")
@@ -194,9 +194,8 @@ def heartbeat_task(
         old_heartbeat = _parse_time(row["heartbeat_at"])
         old_expiry = _parse_time(row["expires_at"])
         duration = old_expiry - old_heartbeat
-        if duration <= timedelta(0):
-            raise LeaseExpiredError(f"lease has an invalid or expired duration: {task_id}")
-        new_expiry = now + duration
+        _validate_stored_lease_duration(duration, task_id)
+        new_expiry = _lease_expiry(now, duration)
         connection.execute(
             "UPDATE leases SET heartbeat_at = ?, expires_at = ? WHERE id = ?",
             (_format_time(now), _format_time(new_expiry), row["id"]),
@@ -292,6 +291,33 @@ def _required_text(value: str, label: str) -> str:
     if not normalized:
         raise InvalidInputError(f"{label} must not be empty")
     return normalized
+
+
+def _validate_requested_lease_duration(lease_seconds: int) -> timedelta:
+    if not isinstance(lease_seconds, int) or isinstance(lease_seconds, bool):
+        raise InvalidInputError("lease seconds must be an integer")
+    if not 1 <= lease_seconds <= MAX_LEASE_SECONDS:
+        raise InvalidInputError(
+            f"lease seconds must be between 1 and {MAX_LEASE_SECONDS}"
+        )
+    return timedelta(seconds=lease_seconds)
+
+
+def _validate_stored_lease_duration(duration: timedelta, task_id: str) -> None:
+    if not timedelta(0) < duration <= MAX_LEASE_DURATION:
+        raise InvalidInputError(
+            f"stored lease duration for {task_id} must be greater than zero "
+            f"and no more than {MAX_LEASE_SECONDS} seconds"
+        )
+
+
+def _lease_expiry(now: datetime, duration: timedelta) -> datetime:
+    try:
+        return now + duration
+    except OverflowError as error:
+        raise InvalidInputError(
+            "lease expiry is outside the supported datetime range"
+        ) from error
 
 
 def _now(now_fn: Clock) -> datetime:

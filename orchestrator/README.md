@@ -38,6 +38,18 @@ python3 -m orchestrator history KC-104
 ```
 
 An expired lease is not stolen or reassigned. It requires manual inspection and recovery.
+Lease durations must be between 1 and 604800 seconds (seven days), inclusive.
+Heartbeats preserve the original duration and reject invalid stored durations rather
+than extending them.
+
+## v0 task states
+
+The implemented v0 path is `QUEUED` → `CLAIMED`, followed by release to
+`REVIEW`, `BLOCKED`, or `FAILED`. `RUNNING` and `READY_FOR_PR` are reserved for
+later orchestration phases and have no v0 CLI transitions. `CANCELLED` is also
+intentionally reserved in v0: cancellation requires a future explicit maintainer
+operation and cannot be selected through the current CLI. `DONE` remains a future
+maintainer-only reviewed-integration operation.
 
 ## Scope limit
 
