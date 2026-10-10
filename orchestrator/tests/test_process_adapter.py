@@ -11,6 +11,7 @@ from unittest.mock import patch
 from orchestrator.adapters.process import (
     ProcessRunner,
     build_safe_environment,
+    redact_text,
     resolve_executable,
 )
 from orchestrator.adapters.results import ExecutableNotFoundError, InvocationError
@@ -105,6 +106,17 @@ class ProcessRunnerTests(unittest.TestCase):
         self.assertNotIn("very-secret-value", logs)
         self.assertNotIn("private-password", logs)
         self.assertIn("[redacted]", logs)
+
+    def test_json_formatted_token_fields_are_redacted(self) -> None:
+        source = (
+            '{"access_token":"alpha", "refresh_token": "bravo", '
+            '"nested":{"api_key":"charlie"}, "ordinary":"visible"}'
+        )
+        redacted = redact_text(source)
+        for secret in ("alpha", "bravo", "charlie"):
+            self.assertNotIn(secret, redacted)
+        self.assertIn('"ordinary":"visible"', redacted)
+        self.assertEqual(3, redacted.count('"[redacted]"'))
 
     def test_environment_rejects_credentials_and_does_not_inherit_them(self) -> None:
         environment = build_safe_environment(

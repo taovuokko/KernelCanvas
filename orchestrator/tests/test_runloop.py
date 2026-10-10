@@ -4,11 +4,12 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from orchestrator.adapters.results import CLIResult
 from orchestrator.database import connect, init_schema
 from orchestrator.models import RunLoopError, TaskState, WrongWorkerError
-from orchestrator.runloop import AutonomousRunLoop, QualityEvidence
+from orchestrator.runloop import AutonomousRunLoop, QualityEvidence, build_default_loop
 from orchestrator.scheduler import add_task, get_attempts, get_task
 
 
@@ -44,7 +45,7 @@ class FakeImplementer:
 
 
 class FakeReviewer:
-    def __init__(self, repo: Path, verdicts: list[dict[str, str]]) -> None:
+    def __init__(self, repo: Path, verdicts: list[object]) -> None:
         self.repo = repo
         self.verdicts = verdicts
         self.prompts: list[str] = []
@@ -133,6 +134,26 @@ class RunLoopTests(unittest.TestCase):
         )
         return outcome, implementer
 
+    def test_default_loop_forwards_only_explicit_auth_profiles(self) -> None:
+        codex_profile = self.base / "codex-profile"
+        claude_profile = self.base / "claude-profile"
+        with patch("orchestrator.runloop.CodexCLI") as codex, patch(
+            "orchestrator.runloop.ClaudeCLI"
+        ) as claude, patch("orchestrator.runloop.SandboxedQualityRunner"):
+            build_default_loop(
+                self.connection,
+                workspace_root=self.base,
+                codex_executable="codex",
+                claude_executable="claude",
+                sandbox_executable="bwrap",
+                codex_runtime_root=None,
+                claude_runtime_root=None,
+                codex_auth_profile=codex_profile,
+                claude_auth_profile=claude_profile,
+            )
+        self.assertEqual(codex_profile, codex.call_args.kwargs["auth_profile"])
+        self.assertEqual(claude_profile, claude.call_args.kwargs["auth_profile"])
+
     def test_fake_agents_request_one_correction_then_approve(self) -> None:
         reviewer = FakeReviewer(
             self.repo,
@@ -161,6 +182,84 @@ class RunLoopTests(unittest.TestCase):
         attempt = get_attempts(self.connection, "KC-106")[0]
         self.assertIn("BLOCKED", attempt.outcome)
         self.assertIsNotNone(attempt.ended_at)
+
+    def test_native_structured_approve_is_accepted(self) -> None:
+        reviewer = FakeReviewer(
+            self.repo,
+            [
+                {
+                    "type": "result",
+                    "result": "Reviewer completed.",
+                    "structured_output": {
+                        "verdict": "APPROVE",
+                        "summary": "No blocking findings.",
+                    },
+                }
+            ],
+        )
+        outcome, _ = self.run_loop(reviewer)
+        self.assertEqual(TaskState.READY_FOR_PR, outcome.state)
+
+    def test_native_structured_request_changes_is_honored(self) -> None:
+        reviewer = FakeReviewer(
+            self.repo,
+            [
+                {
+                    "type": "result",
+                    "structured_output": {
+                        "verdict": "REQUEST_CHANGES",
+                        "summary": "Fix the regression.",
+                    },
+                },
+                {
+                    "type": "result",
+                    "structured_output": {
+                        "verdict": "APPROVE",
+                        "summary": "The regression is fixed.",
+                    },
+                },
+            ],
+        )
+        outcome, implementer = self.run_loop(reviewer)
+        self.assertEqual(TaskState.READY_FOR_PR, outcome.state)
+        self.assertEqual(2, implementer.calls)
+
+    def test_actual_prose_wrapped_verdict_shape_still_fails_closed(self) -> None:
+        reviewer = FakeReviewer(
+            self.repo,
+            [
+                {
+                    "type": "result",
+                    "result": (
+                        "Review explanation without a machine verdict.\n"
+                        "```json\n"
+                        '{"verdict":"APPROVE","summary":"Looks good."}\n'
+                        "```"
+                    ),
+                }
+            ],
+        )
+        with self.assertRaisesRegex(RunLoopError, "verdict is malformed"):
+            self.run_loop(reviewer)
+        self.assertEqual(TaskState.BLOCKED, get_task(self.connection, "KC-106").state)
+
+    def test_malformed_native_structured_output_fails_closed(self) -> None:
+        reviewer = FakeReviewer(
+            self.repo,
+            [
+                {
+                    "type": "result",
+                    "structured_output": {
+                        "verdict": "APPROVE",
+                        "summary": "Looks good.",
+                        "unexpected": True,
+                    },
+                }
+            ],
+        )
+        with self.assertRaisesRegex(RunLoopError, "invalid schema"):
+            self.run_loop(reviewer)
+        self.assertEqual(TaskState.BLOCKED, get_task(self.connection, "KC-106").state)
 
     def test_at_most_two_corrections_are_attempted(self) -> None:
         reviewer = FakeReviewer(

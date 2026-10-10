@@ -16,6 +16,7 @@ from orchestrator.adapters.results import CLIResult
 FIXTURES = Path(__file__).parent / "fixtures"
 PROBE_CLI = FIXTURES / "bwrap_probe_cli.py"
 BWRAP = Path("/usr/bin/bwrap")
+NODE = Path("/usr/bin/node")
 OPT_IN_VARIABLE = "KERNELCANVAS_RUN_BWRAP_INTEGRATION"
 
 
@@ -161,6 +162,91 @@ class RealBubblewrapIntegrationTests(unittest.TestCase):
         assert isinstance(probe, dict)
         self.assertTrue(probe["outside_inaccessible"])
 
+    def test_crypto_policy_symlink_and_target_are_available_to_both_clis(self) -> None:
+        config = "/etc/crypto-policies/back-ends/opensslcnf.config"
+        expected_target = str(Path(config).resolve(strict=True))
+        cases = (
+            (
+                "claude",
+                lambda: self.adapter().review(
+                    json.dumps(
+                        {
+                            "outside_path": str(self.base / "not-mounted"),
+                            "crypto_policy_path": config,
+                        }
+                    ),
+                    cwd=self.workspace,
+                    timeout_seconds=10,
+                    log_dir=self.base / "claude-crypto-policy-logs",
+                ),
+            ),
+            (
+                "codex",
+                lambda: self.codex_adapter().implement(
+                    json.dumps(
+                        {
+                            "outside_path": str(self.base / "not-mounted"),
+                            "crypto_policy_path": config,
+                        }
+                    ),
+                    worktree=self.workspace,
+                    timeout_seconds=10,
+                    log_dir=self.base / "codex-crypto-policy-logs",
+                ),
+            ),
+        )
+        for provider, invoke in cases:
+            with self.subTest(provider=provider):
+                result = invoke()
+                self.assertTrue(result.succeeded, result.parse_error)
+                probe = result.parsed
+                if provider == "codex":
+                    assert isinstance(probe, list)
+                    probe = probe[0]
+                assert isinstance(probe, dict)
+                self.assertTrue(probe["crypto_policy_is_symlink"])
+                self.assertTrue(probe["crypto_policy_readable"])
+                self.assertEqual(expected_target, probe["crypto_policy_target"])
+
+    def test_fedora_node_starts_with_crypto_policy_inside_bubblewrap(self) -> None:
+        if not NODE.is_file() or not os.access(NODE, os.X_OK):
+            self.skipTest("Fedora Node.js unavailable: /usr/bin/node is missing")
+        config = "/etc/crypto-policies/back-ends/opensslcnf.config"
+        result = subprocess.run(
+            [
+                str(BWRAP),
+                "--die-with-parent",
+                "--new-session",
+                "--unshare-pid",
+                *_system_mount_arguments(),
+                "--dev",
+                "/dev",
+                "--proc",
+                "/proc",
+                "--tmpfs",
+                "/tmp",
+                "--",
+                str(NODE),
+                "-e",
+                (
+                    'const fs=require("fs");'
+                    f'const p="{config}";'
+                    "console.log(fs.realpathSync(p));"
+                    "fs.accessSync(p,fs.constants.R_OK);"
+                ),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            str(Path(config).resolve(strict=True)), result.stdout.strip()
+        )
+
     def test_codex_path_outside_approved_mounts_is_denied(self) -> None:
         denied = self.base / "personal-credentials" / "auth.json"
         denied.parent.mkdir()
@@ -186,6 +272,72 @@ class RealBubblewrapIntegrationTests(unittest.TestCase):
         probe = result.parsed[0]
         assert isinstance(probe, dict)
         self.assertTrue(probe["outside_inaccessible"])
+
+    def test_explicit_profiles_are_visible_and_writable_for_cli_refresh(self) -> None:
+        auth_root = self.base / "kernelcanvas-auth"
+        cases = (
+            ("claude", "CLAUDE_CONFIG_DIR", "/home/kernelcanvas/.claude"),
+            ("codex", "CODEX_HOME", "/home/kernelcanvas/.codex"),
+        )
+        for provider, variable, sandbox_profile in cases:
+            with self.subTest(provider=provider):
+                profile = auth_root / provider / "supervised"
+                profile.mkdir(parents=True)
+                (profile / "profile-marker.txt").write_text(
+                    "dedicated-profile", encoding="utf-8"
+                )
+                for directory in (auth_root, profile.parent, profile):
+                    directory.chmod(0o700)
+                with patch(
+                    "orchestrator.adapters.auth.dedicated_auth_root",
+                    return_value=auth_root,
+                ):
+                    if provider == "claude":
+                        result = ClaudeCLI(
+                            self.workspace,
+                            executable=str(self.probe_cli),
+                            sandbox_executable=str(BWRAP),
+                            auth_profile=profile,
+                        ).review(
+                            json.dumps(
+                                {
+                                    "outside_path": str(self.base / "not-mounted"),
+                                    "profile_environment": variable,
+                                }
+                            ),
+                            cwd=self.workspace,
+                            timeout_seconds=10,
+                            log_dir=self.base / "claude-auth-logs",
+                        )
+                        probe = result.parsed
+                    else:
+                        result = CodexCLI(
+                            self.workspace,
+                            executable=str(self.probe_cli),
+                            sandbox_executable=str(BWRAP),
+                            auth_profile=profile,
+                        ).implement(
+                            json.dumps(
+                                {
+                                    "outside_path": str(self.base / "not-mounted"),
+                                    "profile_environment": variable,
+                                }
+                            ),
+                            worktree=self.workspace,
+                            timeout_seconds=10,
+                            log_dir=self.base / "codex-auth-logs",
+                        )
+                        assert isinstance(result.parsed, list)
+                        probe = result.parsed[0]
+                self.assertTrue(result.succeeded, result.parse_error)
+                assert isinstance(probe, dict)
+                self.assertEqual(sandbox_profile, probe["profile_directory"])
+                self.assertEqual("dedicated-profile", probe["profile_read"])
+                self.assertTrue(probe["profile_refresh_succeeded"])
+                self.assertEqual(
+                    "refreshed",
+                    (profile / "refresh-marker.txt").read_text(encoding="utf-8"),
+                )
 
     def test_real_bwrap_startup_failure_is_reported_as_failure(self) -> None:
         with patch(

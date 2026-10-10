@@ -33,6 +33,8 @@ Use concise Architecture Decision Records (ADRs) to prevent independent agents f
 | ADR-008 | Repository license and open-core/commercial model | **OPEN** | Explicit owner legal/business decision before public licensing claims |
 | ADR-009 | Local build isolation and host/tool approval model | **OPEN** | Document host risk and execution policy before M4 |
 | ADR-010 | Architecture dependency checker/`xtask` location | **PROPOSED** | Implement only after meaningful crate boundaries exist |
+| ADR-011 | Development roadmap IDs for authentication and parallel workers | **ACCEPTED** | KC-107 is supervised subscription authentication; KC-108 remains an unassigned roadmap placeholder |
+| ADR-012 | Fedora/OpenSSL compatibility scope for supervised CLI execution | **ACCEPTED** | Expose only the required crypto-policy link and approved target |
 
 The product docs already prescribe **Yocto-native behavior, local-first MVP, no mandatory cloud account and explicit side effects**. These are current product principles, not permission to decide unresolved security/toolchain or licensing details automatically.
 
@@ -114,6 +116,34 @@ The product docs already prescribe **Yocto-native behavior, local-first MVP, no 
 **Proposed:** Implement `cargo xtask layers`/equivalent with `cargo metadata` once the workspace has clear application, adapter and domain crate boundaries.  
 **Risk:** Prematurely introducing empty crates and brittle checks.  
 **Validation:** Positive allowed-dependency fixture, negative forbidden-dependency fixture, CI step only when command exists.
+
+### ADR-011 — Development roadmap IDs for authentication and parallel workers
+
+**Status:** ACCEPTED
+**Date:** 2026-10-10
+**Owner/approver:** KernelCanvas repository maintainer
+**Affected tasks:** KC-105, KC-107, KC-108
+
+**Context:** Earlier development-orchestration documentation used KC-107 for the planned two-parallel-implementer milestone. KC-107 is now assigned to supervised subscription authentication, creating a task-ID collision.
+
+**Decision:** KC-107 consistently identifies Supervised Subscription Authentication. The future two-parallel-implementer milestone is deferred and renumbered KC-108.
+
+**Consequences:** Historical task records keep their original scope, with forward references corrected and the renumbering documented. KC-108 is a roadmap placeholder only; this decision does not create or assign a GitHub issue.
+
+**Approval:** Explicit maintainer decision supplied for the KC-107 worktree on 2026-10-10.
+
+### ADR-012 — Fedora/OpenSSL compatibility scope for supervised CLI execution
+
+**Status:** ACCEPTED
+**Date:** 2026-10-10
+**Owner/approver:** KernelCanvas repository maintainer
+**Affected task:** KC-107
+
+**Decision:** KC-107 includes the narrowly scoped Fedora/OpenSSL crypto-policy compatibility required for the supervised Codex live smoke test. The sandbox may expose only the required crypto-policy symlink and its approved system target. Full `/etc` mounts and weakened sandbox isolation are forbidden.
+
+**Consequences:** This approval does not authorize broader runtime mounts, credential access, or network privileges.
+
+**Approval:** Explicit maintainer approval supplied for the KC-107 Fedora/OpenSSL compatibility correction on 2026-10-10.
 
 ## 5. Copyable ADR template
 

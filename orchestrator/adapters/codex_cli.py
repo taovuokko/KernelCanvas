@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 from typing import Mapping
 
+from . import auth
 from .claude_cli import _system_mount_arguments
 from .process import (
     ProcessOutput,
@@ -30,6 +31,7 @@ _SANDBOX_WORKTREE = Path("/workspace")
 _SANDBOX_HOME = Path("/home/kernelcanvas")
 _SANDBOX_CACHE = Path("/tmp/cache")
 _SANDBOX_RUNTIME = Path("/run/kernelcanvas/codex-runtime")
+_SANDBOX_AUTH_PROFILE = _SANDBOX_HOME / ".codex"
 _SYSTEM_RUNTIME_ROOTS = (
     Path("/usr/bin"),
     Path("/usr/lib"),
@@ -42,9 +44,9 @@ _SYSTEM_RUNTIME_ROOTS = (
 class CodexCLI:
     """Invoke Codex in Bubblewrap plus Codex's workspace-write sandbox.
 
-    The sandbox intentionally has an empty home and does not mount the host's
-    Codex authentication files. A real CLI that cannot authenticate without
-    those files must fail closed; callers must not retry it outside Bubblewrap.
+    The sandbox has an empty home unless a maintainer explicitly selects a
+    dedicated KernelCanvas auth profile. A selected profile is visible inside
+    the sandbox and is not isolated from agent-controlled commands.
     """
 
     def __init__(
@@ -54,6 +56,7 @@ class CodexCLI:
         executable: str = "codex",
         sandbox_executable: str = "bwrap",
         runtime_root: Path | None = None,
+        auth_profile: Path | None = None,
         runner: ProcessRunner | None = None,
         environment: Mapping[str, str] | None = None,
     ) -> None:
@@ -66,6 +69,11 @@ class CodexCLI:
         self.executable = executable
         self.sandbox_executable = sandbox_executable
         self.runtime_root = runtime_root
+        self.auth_profile = (
+            auth.resolve_auth_profile(auth_profile, provider="codex")
+            if auth_profile is not None
+            else None
+        )
         self.runner = runner or ProcessRunner()
         self.environment = build_safe_environment(environment)
 
@@ -85,6 +93,11 @@ class CodexCLI:
             raise InvocationError(
                 f"worktree is outside configured workspace root: {resolved_worktree}"
             )
+        auth_profile = (
+            auth.resolve_auth_profile(self.auth_profile, provider="codex")
+            if self.auth_profile is not None
+            else None
+        )
         codex = Path(resolve_executable(self.executable, self.environment))
         bubblewrap = resolve_executable(self.sandbox_executable, self.environment)
         runtime_arguments, sandbox_codex = _codex_runtime_mount(
@@ -153,6 +166,7 @@ class CodexCLI:
             "--setenv",
             "GIT_TERMINAL_PROMPT",
             "0",
+            *_auth_profile_arguments(auth_profile),
             "--bind",
             str(resolved_worktree),
             str(_SANDBOX_WORKTREE),
@@ -179,6 +193,19 @@ class CodexCLI:
             log_dir=log_dir,
         )
         return _jsonl_result(output)
+
+
+def _auth_profile_arguments(profile: Path | None) -> tuple[str, ...]:
+    if profile is None:
+        return ()
+    return (
+        "--bind",
+        str(profile),
+        str(_SANDBOX_AUTH_PROFILE),
+        "--setenv",
+        "CODEX_HOME",
+        str(_SANDBOX_AUTH_PROFILE),
+    )
 
 
 def _codex_runtime_mount(
