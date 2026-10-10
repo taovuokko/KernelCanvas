@@ -28,13 +28,24 @@ ALLOWED_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
     TaskState.QUEUED: frozenset({TaskState.CLAIMED}),
     TaskState.CLAIMED: frozenset(
         {
+            TaskState.RUNNING,
             TaskState.REVIEW,
             TaskState.BLOCKED,
             TaskState.FAILED,
             TaskState.CANCELLED,
         }
     ),
-    TaskState.REVIEW: frozenset({TaskState.BLOCKED, TaskState.FAILED}),
+    TaskState.RUNNING: frozenset(
+        {TaskState.REVIEW, TaskState.BLOCKED, TaskState.FAILED}
+    ),
+    TaskState.REVIEW: frozenset(
+        {
+            TaskState.RUNNING,
+            TaskState.READY_FOR_PR,
+            TaskState.BLOCKED,
+            TaskState.FAILED,
+        }
+    ),
 }
 
 
@@ -131,5 +142,13 @@ class SchemaVersionError(OrchestratorError):
 
 
 class InvalidInputError(OrchestratorError):
+    pass
+
+
+class WorktreeError(OrchestratorError):
+    pass
+
+
+class RunLoopError(OrchestratorError):
     pass
 

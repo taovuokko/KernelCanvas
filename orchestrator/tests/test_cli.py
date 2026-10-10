@@ -9,7 +9,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from orchestrator import scheduler
 from orchestrator.cli import ExitCode, main
+from orchestrator.database import connect
+from orchestrator.models import TaskState
 
 
 class CliTests(unittest.TestCase):
@@ -200,6 +203,81 @@ class CliTests(unittest.TestCase):
         code, _, stderr = self.run_cli("status")
         self.assertEqual(ExitCode.DATABASE_ERROR, code)
         self.assertIn("unsupported schema version", stderr)
+
+    def test_run_dry_run_has_no_database_or_log_side_effects(self) -> None:
+        evidence = self.base / "evidence"
+        code, output, stderr = self.run_cli(
+            "run",
+            "KC-106",
+            "--worker",
+            "worker",
+            "--reviewer",
+            "reviewer",
+            "--workspace-root",
+            str(self.base),
+            "--worktree",
+            str(self.base / "missing-worktree"),
+            "--branch",
+            "agent/KC-106-autonomous-loop",
+            "--evidence-root",
+            str(evidence),
+            "--dry-run",
+        )
+        self.assertEqual(ExitCode.SUCCESS, code, stderr)
+        self.assertIn("corrections<=2", output)
+        self.assertFalse(self.db_path.exists())
+        self.assertFalse(evidence.exists())
+
+    def test_attempts_command_reports_persisted_outcome_and_evidence(self) -> None:
+        self.init_and_add()
+        self.assertEqual(
+            ExitCode.SUCCESS,
+            self.run_cli(
+                "claim",
+                "KC-104",
+                "--worker",
+                "worker",
+                "--reviewer",
+                "reviewer",
+                "--lease-seconds",
+                "60",
+            )[0],
+        )
+        connection = connect(self.db_path)
+        try:
+            lease = scheduler.get_task(connection, "KC-104").lease
+            assert lease is not None
+            scheduler.transition_active_task(
+                connection,
+                "KC-104",
+                "worker",
+                lease.lease_token,
+                TaskState.RUNNING,
+                "start",
+            )
+            attempt = scheduler.start_attempt(
+                connection,
+                "KC-104",
+                "worker",
+                lease.lease_token,
+                "IMPLEMENTATION",
+                "/tmp/evidence/attempt-1",
+            )
+            scheduler.finish_attempt(
+                connection,
+                attempt.id,
+                "KC-104",
+                "worker",
+                lease.lease_token,
+                "APPROVED",
+            )
+        finally:
+            connection.close()
+        code, output, stderr = self.run_cli("attempts", "KC-104")
+        self.assertEqual(ExitCode.SUCCESS, code, stderr)
+        self.assertIn("attempt=1 phase=IMPLEMENTATION", output)
+        self.assertIn("outcome=APPROVED", output)
+        self.assertIn("evidence=/tmp/evidence/attempt-1", output)
 
 
 if __name__ == "__main__":
