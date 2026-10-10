@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Sequence, TextIO
 
 from . import database, scheduler
+from .adapters.results import AdapterError
 from .models import (
     DuplicateTaskError,
     InvalidInputError,
@@ -36,6 +37,7 @@ class ExitCode(IntEnum):
     INVALID_TRANSITION = 5
     LEASE_ERROR = 6
     DATABASE_ERROR = 7
+    EXECUTION_ERROR = 8
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -77,6 +79,33 @@ def build_parser() -> argparse.ArgumentParser:
 
     history = commands.add_parser("history", help="show ordered transition history")
     history.add_argument("task_id", metavar="TASK_ID")
+
+    attempts = commands.add_parser("attempts", help="show persisted execution attempts")
+    attempts.add_argument("task_id", metavar="TASK_ID")
+
+    run = commands.add_parser("run", help="run one bounded implementation/review loop")
+    run.add_argument("task_id", metavar="TASK_ID")
+    run.add_argument("--worker", required=True)
+    run.add_argument("--reviewer", required=True)
+    run.add_argument("--workspace-root", type=Path, required=True)
+    run.add_argument("--worktree", type=Path, required=True)
+    run.add_argument("--branch", required=True)
+    run.add_argument("--lease-seconds", type=int, default=1800)
+    run.add_argument("--timeout-seconds", type=float, default=300.0)
+    run.add_argument(
+        "--check",
+        action="append",
+        choices=["orchestrator-tests", "orchestrator-help"],
+        dest="checks",
+    )
+    run.add_argument("--evidence-root", type=Path, required=True)
+    run.add_argument("--codex-executable", default="codex")
+    run.add_argument("--claude-executable", default="claude")
+    run.add_argument("--sandbox-executable", default="bwrap")
+    run.add_argument("--codex-runtime-root", type=Path)
+    run.add_argument("--claude-runtime-root", type=Path)
+    run.add_argument("--authorize-real-execution", action="store_true")
+    run.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -89,6 +118,15 @@ def main(
     output = stdout or sys.stdout
     errors = stderr or sys.stderr
     args = build_parser().parse_args(argv)
+    if args.command == "run" and args.dry_run:
+        checks = args.checks or ["orchestrator-tests", "orchestrator-help"]
+        print(
+            f"dry-run task={args.task_id} branch={args.branch} "
+            f"worktree={args.worktree} checks={','.join(checks)} "
+            "phases=implement,quality,review corrections<=2",
+            file=output,
+        )
+        return ExitCode.SUCCESS
     db_path = database.resolve_db_path()
     try:
         if args.command == "init":
@@ -130,6 +168,9 @@ def main(
     except OrchestratorError as error:
         print(f"error: {error}", file=errors)
         return ExitCode.INVALID_INPUT
+    except AdapterError as error:
+        print(f"execution error: {error}", file=errors)
+        return ExitCode.EXECUTION_ERROR
 
 
 def _open_existing_database(path: Path) -> sqlite3.Connection:
@@ -197,6 +238,45 @@ def _run_command(
                 f"{event.prior_state.value}->{event.next_state.value}{reason}",
                 file=output,
             )
+    elif args.command == "attempts":
+        attempts = scheduler.get_attempts(connection, args.task_id)
+        if not attempts:
+            print(f"no attempts for {args.task_id}", file=output)
+        for attempt in attempts:
+            ended = attempt.ended_at.isoformat() if attempt.ended_at else "-"
+            print(
+                f"attempt={attempt.attempt_number} phase={attempt.phase} "
+                f"worker={attempt.worker} outcome={attempt.outcome or '-'} "
+                f"started={attempt.started_at.isoformat()} ended={ended} "
+                f"evidence={attempt.log_location or '-'}",
+                file=output,
+            )
+    elif args.command == "run":
+        from .runloop import build_default_loop
+
+        loop = build_default_loop(
+            connection,
+            workspace_root=args.workspace_root,
+            codex_executable=args.codex_executable,
+            claude_executable=args.claude_executable,
+            sandbox_executable=args.sandbox_executable,
+            codex_runtime_root=args.codex_runtime_root,
+            claude_runtime_root=args.claude_runtime_root,
+        )
+        result = loop.run(
+            args.task_id,
+            worker=args.worker,
+            reviewer_name=args.reviewer,
+            workspace_root=args.workspace_root,
+            worktree=args.worktree,
+            expected_branch=args.branch,
+            lease_seconds=args.lease_seconds,
+            timeout_seconds=args.timeout_seconds,
+            check_ids=args.checks or ["orchestrator-tests", "orchestrator-help"],
+            evidence_root=args.evidence_root,
+            authorize_real_execution=args.authorize_real_execution,
+        )
+        print(result.handover, file=output)
     return ExitCode.SUCCESS
 
 

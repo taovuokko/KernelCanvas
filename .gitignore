@@ -6,3 +6,7 @@ dist/
 !.env.example
 .agent-work/
 .DS_Store
+
+# Python bytecode
+__pycache__/
+*.py[cod]

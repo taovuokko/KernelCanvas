@@ -25,10 +25,14 @@ from orchestrator.scheduler import (
     add_task,
     claim_task,
     get_history,
+    get_attempts,
     get_task,
     heartbeat_task,
     list_tasks,
     release_task,
+    start_attempt,
+    finish_attempt,
+    transition_active_task,
 )
 
 
@@ -345,6 +349,51 @@ class SchedulerTests(unittest.TestCase):
     def test_history_unknown_task_is_rejected(self) -> None:
         with self.assertRaises(TaskNotFoundError):
             get_history(self.connection, "KC-404")
+
+    def test_attempt_lifecycle_requires_live_token_and_persists_evidence(self) -> None:
+        self.add()
+        lease = self.claim()
+        transition_active_task(
+            self.connection,
+            "KC-104",
+            "worker",
+            lease.lease_token,
+            TaskState.RUNNING,
+            "start",
+            now_fn=self.clock,
+        )
+        attempt = start_attempt(
+            self.connection,
+            "KC-104",
+            "worker",
+            lease.lease_token,
+            "IMPLEMENTATION",
+            "/tmp/evidence/attempt-1",
+            now_fn=self.clock,
+        )
+        with self.assertRaises(WrongWorkerError):
+            finish_attempt(
+                self.connection,
+                attempt.id,
+                "KC-104",
+                "worker",
+                "wrong-token",
+                "APPROVED",
+                now_fn=self.clock,
+            )
+        self.clock.advance(1)
+        completed = finish_attempt(
+            self.connection,
+            attempt.id,
+            "KC-104",
+            "worker",
+            lease.lease_token,
+            "APPROVED",
+            now_fn=self.clock,
+        )
+        self.assertEqual("APPROVED", completed.outcome)
+        self.assertEqual("/tmp/evidence/attempt-1", completed.log_location)
+        self.assertEqual([completed], get_attempts(self.connection, "KC-104"))
 
 
 if __name__ == "__main__":

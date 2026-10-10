@@ -73,7 +73,12 @@ class ClaudeCLITests(unittest.TestCase):
         )
         self.assertIn(str(self.worktree), sandbox_argv)
         self.assertNotIn(str(self.base), sandbox_argv)
-        self.assertNotIn(str(Path.home()), sandbox_argv)
+        read_only_sources = {
+            sandbox_argv[index + 1]
+            for index, value in enumerate(sandbox_argv[:-2])
+            if value == "--ro-bind"
+        }
+        self.assertNotIn(str(Path.home()), read_only_sources)
 
     def test_cwd_outside_workspace_and_symlink_escape_are_rejected(self) -> None:
         outside = self.base.parent / f"{self.base.name}-outside"

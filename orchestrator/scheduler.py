@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from .models import (
     DuplicateTaskError,
     Event,
+    Attempt,
     InvalidInputError,
     InvalidIssueUrlError,
     InvalidTaskFileError,
@@ -222,8 +223,13 @@ def release_task(
         target = next_state if isinstance(next_state, TaskState) else TaskState(next_state)
     except ValueError as error:
         raise InvalidTransitionError(f"unknown target state: {next_state}") from error
-    if target not in {TaskState.REVIEW, TaskState.BLOCKED, TaskState.FAILED}:
-        raise InvalidTransitionError(f"release target is not allowed in v0: {target.value}")
+    if target not in {
+        TaskState.REVIEW,
+        TaskState.READY_FOR_PR,
+        TaskState.BLOCKED,
+        TaskState.FAILED,
+    }:
+        raise InvalidTransitionError(f"release target is not allowed: {target.value}")
 
     now = _now(now_fn)
     connection.execute("BEGIN IMMEDIATE")
@@ -249,6 +255,181 @@ def release_task(
         _rollback(connection)
         raise
     return Event(event_id, task_id, worker, prior, target, reason, now)
+
+
+def transition_active_task(
+    connection: sqlite3.Connection,
+    task_id: str,
+    worker: str,
+    lease_token: str,
+    next_state: TaskState,
+    reason: str,
+    *,
+    now_fn: Clock = utc_now,
+) -> Event:
+    """Transition a running task while retaining its active lease."""
+
+    worker = _required_text(worker, "worker")
+    lease_token = _required_text(lease_token, "lease token")
+    reason = _required_text(reason, "reason")
+    now = _now(now_fn)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        prior = _require_task(connection, task_id)
+        row = _active_lease_row(connection, task_id)
+        _validate_live_lease(row, task_id, worker, lease_token, now)
+        if not transition_allowed(prior, next_state):
+            raise InvalidTransitionError(
+                f"cannot transition task {task_id} from {prior.value} to {next_state.value}"
+            )
+        connection.execute(
+            "UPDATE tasks SET state = ?, updated_at = ? WHERE id = ?",
+            (next_state.value, _format_time(now), task_id),
+        )
+        event_id = _insert_event(
+            connection, task_id, worker, prior, next_state, reason, now
+        )
+        connection.execute("COMMIT")
+    except Exception:
+        _rollback(connection)
+        raise
+    return Event(event_id, task_id, worker, prior, next_state, reason, now)
+
+
+def require_live_lease(
+    connection: sqlite3.Connection,
+    task_id: str,
+    worker: str,
+    lease_token: str,
+    *,
+    minimum_remaining_seconds: float = 0,
+    now_fn: Clock = utc_now,
+) -> Lease:
+    """Return the lease only when owner, token, expiry and phase budget are valid."""
+
+    if minimum_remaining_seconds < 0:
+        raise InvalidInputError("minimum remaining lease time must not be negative")
+    now = _now(now_fn)
+    _require_task(connection, task_id)
+    row = _active_lease_row(connection, task_id)
+    _validate_live_lease(row, task_id, worker, lease_token, now)
+    expires_at = _parse_time(row["expires_at"])
+    if (expires_at - now).total_seconds() < minimum_remaining_seconds:
+        raise LeaseExpiredError(
+            f"lease for {task_id} does not cover the next bounded phase"
+        )
+    return _lease_from_row(
+        row,
+        heartbeat_at=_parse_time(row["heartbeat_at"]),
+        expires_at=expires_at,
+    )
+
+
+def start_attempt(
+    connection: sqlite3.Connection,
+    task_id: str,
+    worker: str,
+    lease_token: str,
+    phase: str,
+    log_location: str,
+    *,
+    now_fn: Clock = utc_now,
+) -> Attempt:
+    worker = _required_text(worker, "worker")
+    phase = _required_text(phase, "attempt phase")
+    log_location = _required_text(log_location, "log location")
+    now = _now(now_fn)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        _require_task(connection, task_id)
+        row = _active_lease_row(connection, task_id)
+        _validate_live_lease(row, task_id, worker, lease_token, now)
+        number = int(
+            connection.execute(
+                "SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM attempts WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()[0]
+        )
+        cursor = connection.execute(
+            """
+            INSERT INTO attempts(
+                task_id, attempt_number, worker, phase, started_at, log_location
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (task_id, number, worker, phase, _format_time(now), log_location),
+        )
+        connection.execute("COMMIT")
+    except Exception:
+        _rollback(connection)
+        raise
+    return Attempt(
+        id=int(cursor.lastrowid),
+        task_id=task_id,
+        attempt_number=number,
+        worker=worker,
+        phase=phase,
+        started_at=now,
+        ended_at=None,
+        outcome=None,
+        log_location=log_location,
+    )
+
+
+def finish_attempt(
+    connection: sqlite3.Connection,
+    attempt_id: int,
+    task_id: str,
+    worker: str,
+    lease_token: str,
+    outcome: str,
+    *,
+    now_fn: Clock = utc_now,
+) -> Attempt:
+    outcome = _required_text(outcome, "attempt outcome")
+    if len(outcome) > 1000:
+        raise InvalidInputError("attempt outcome exceeds 1000 characters")
+    now = _now(now_fn)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = _active_lease_row(connection, task_id)
+        _validate_live_lease(row, task_id, worker, lease_token, now)
+        cursor = connection.execute(
+            """
+            UPDATE attempts SET ended_at = ?, outcome = ?
+            WHERE id = ? AND task_id = ? AND worker = ? AND ended_at IS NULL
+            """,
+            (_format_time(now), outcome, attempt_id, task_id, worker),
+        )
+        if cursor.rowcount != 1:
+            raise InvalidInputError(f"open attempt not found: {attempt_id}")
+        connection.execute("COMMIT")
+    except Exception:
+        _rollback(connection)
+        raise
+    completed = connection.execute(
+        """
+        SELECT id, task_id, attempt_number, worker, phase, started_at,
+               ended_at, outcome, log_location
+        FROM attempts WHERE id = ?
+        """,
+        (attempt_id,),
+    ).fetchone()
+    if completed is None:
+        raise InvalidInputError(f"attempt not found after update: {attempt_id}")
+    return _attempt_from_row(completed)
+
+
+def get_attempts(connection: sqlite3.Connection, task_id: str) -> list[Attempt]:
+    _require_task(connection, task_id)
+    rows = connection.execute(
+        """
+        SELECT id, task_id, attempt_number, worker, phase, started_at,
+               ended_at, outcome, log_location
+        FROM attempts WHERE task_id = ? ORDER BY attempt_number
+        """,
+        (task_id,),
+    ).fetchall()
+    return [_attempt_from_row(row) for row in rows]
 
 
 def get_history(connection: sqlite3.Connection, task_id: str) -> list[Event]:
@@ -366,6 +547,18 @@ def _validate_live_owner(
         )
 
 
+def _validate_live_lease(
+    row: sqlite3.Row,
+    task_id: str,
+    worker: str,
+    lease_token: str,
+    now: datetime,
+) -> None:
+    _validate_live_owner(row, task_id, worker, now)
+    if row["lease_token"] != lease_token:
+        raise WrongWorkerError(f"active lease token for {task_id} does not match")
+
+
 def _insert_event(
     connection: sqlite3.Connection,
     task_id: str,
@@ -428,5 +621,19 @@ def _lease_from_row(
         expires_at=expires_at,
         heartbeat_at=heartbeat_at,
         status=LeaseStatus(row["status"]),
+    )
+
+
+def _attempt_from_row(row: sqlite3.Row) -> Attempt:
+    return Attempt(
+        id=row["id"],
+        task_id=row["task_id"],
+        attempt_number=row["attempt_number"],
+        worker=row["worker"],
+        phase=row["phase"],
+        started_at=_parse_time(row["started_at"]),
+        ended_at=_parse_time(row["ended_at"]) if row["ended_at"] else None,
+        outcome=row["outcome"],
+        log_location=row["log_location"],
     )
 
