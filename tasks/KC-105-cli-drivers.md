@@ -4,7 +4,9 @@
 
 ## Outcome
 
-Implement testable, opt-in Python subprocess adapters for locally installed `claude` (read-only planner/reviewer) and `codex` (scoped implementer). A dry-run mode validates arguments and paths without launching model sessions. KC-106 will add the repair loop; KC-107 will add concurrent scheduling.
+Implement testable, opt-in Python subprocess adapters for locally installed `claude` (read-only planner/reviewer) and `codex` (scoped implementer). A dry-run mode validates arguments and paths without launching model sessions. KC-106 will add the repair loop; concurrent scheduling is deferred to the KC-108 roadmap placeholder.
+
+> Roadmap correction (2026-10-10): the later concurrent-scheduling milestone was renumbered from KC-107 to KC-108 when KC-107 was assigned to Supervised Subscription Authentication. This preserves KC-105's historical scope and does not create or assign a KC-108 GitHub issue.
 
 ## CLI principles
 

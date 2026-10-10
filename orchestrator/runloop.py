@@ -503,6 +503,8 @@ def build_default_loop(
     sandbox_executable: str,
     codex_runtime_root: Path | None,
     claude_runtime_root: Path | None,
+    codex_auth_profile: Path | None,
+    claude_auth_profile: Path | None,
 ) -> AutonomousRunLoop:
     return AutonomousRunLoop(
         connection,
@@ -511,12 +513,14 @@ def build_default_loop(
             executable=codex_executable,
             sandbox_executable=sandbox_executable,
             runtime_root=codex_runtime_root,
+            auth_profile=codex_auth_profile,
         ),
         reviewer=ClaudeCLI(
             workspace_root,
             executable=claude_executable,
             sandbox_executable=sandbox_executable,
             runtime_root=claude_runtime_root,
+            auth_profile=claude_auth_profile,
         ),
         quality_runner=SandboxedQualityRunner(sandbox_executable=sandbox_executable),
     )
@@ -570,7 +574,11 @@ def _strict_review_verdict(result: CLIResult) -> tuple[str, str]:
     if not result.succeeded:
         raise RunLoopError(_adapter_failure("reviewer", result))
     value = result.parsed
-    if isinstance(value, dict) and set(value) == {"verdict", "summary"}:
+    if isinstance(value, dict) and "structured_output" in value:
+        report = value["structured_output"]
+        if not isinstance(report, dict) or set(report) != {"verdict", "summary"}:
+            raise RunLoopError("reviewer verdict has an invalid schema")
+    elif isinstance(value, dict) and set(value) == {"verdict", "summary"}:
         report = value
     elif isinstance(value, dict) and isinstance(value.get("result"), str):
         try:

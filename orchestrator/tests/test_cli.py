@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from orchestrator import scheduler
-from orchestrator.cli import ExitCode, main
+from orchestrator.cli import ExitCode, build_parser, main
 from orchestrator.database import connect
 from orchestrator.models import TaskState
 
@@ -225,8 +225,93 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(ExitCode.SUCCESS, code, stderr)
         self.assertIn("corrections<=2", output)
+        self.assertIn("auth-profiles=disabled", output)
+        self.assertIn("credentials-agent-readable=false", output)
         self.assertFalse(self.db_path.exists())
         self.assertFalse(evidence.exists())
+
+    def test_run_parser_exposes_explicit_auth_profiles(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "run",
+                "KC-107",
+                "--worker",
+                "worker",
+                "--reviewer",
+                "reviewer",
+                "--workspace-root",
+                str(self.base),
+                "--worktree",
+                str(self.base / "worktree"),
+                "--branch",
+                "agent/KC-107-live-auth",
+                "--evidence-root",
+                str(self.base / "evidence"),
+                "--codex-auth-profile",
+                "/home/user/.local/share/kernelcanvas/auth/codex/supervised",
+                "--claude-auth-profile",
+                "/home/user/.local/share/kernelcanvas/auth/claude/supervised",
+                "--acknowledge-auth-profile-exposure",
+                "--authorize-real-execution",
+            ]
+        )
+        self.assertEqual("supervised", args.codex_auth_profile.name)
+        self.assertEqual("supervised", args.claude_auth_profile.name)
+        self.assertTrue(args.acknowledge_auth_profile_exposure)
+        self.assertTrue(args.authorize_real_execution)
+
+    def test_auth_profile_dry_run_stays_side_effect_free_and_reports_risk(self) -> None:
+        evidence = self.base / "evidence"
+        code, output, stderr = self.run_cli(
+            "run",
+            "KC-107",
+            "--worker",
+            "worker",
+            "--reviewer",
+            "reviewer",
+            "--workspace-root",
+            str(self.base),
+            "--worktree",
+            str(self.base / "missing-worktree"),
+            "--branch",
+            "agent/KC-107-live-auth",
+            "--evidence-root",
+            str(evidence),
+            "--codex-auth-profile",
+            str(self.base / "missing-codex-profile"),
+            "--claude-auth-profile",
+            str(self.base / "missing-claude-profile"),
+            "--dry-run",
+        )
+        self.assertEqual(ExitCode.SUCCESS, code, stderr)
+        self.assertIn("auth-profiles=codex,claude", output)
+        self.assertIn("credentials-agent-readable=true", output)
+        self.assertFalse(self.db_path.exists())
+        self.assertFalse(evidence.exists())
+
+    def test_live_auth_profile_requires_exposure_acknowledgement(self) -> None:
+        self.init_and_add()
+        code, _, stderr = self.run_cli(
+            "run",
+            "KC-104",
+            "--worker",
+            "worker",
+            "--reviewer",
+            "reviewer",
+            "--workspace-root",
+            str(self.base),
+            "--worktree",
+            str(self.base),
+            "--branch",
+            "agent/KC-107-live-auth",
+            "--evidence-root",
+            str(self.base / "evidence"),
+            "--codex-auth-profile",
+            str(self.base / "profile"),
+            "--authorize-real-execution",
+        )
+        self.assertEqual(ExitCode.INVALID_INPUT, code)
+        self.assertIn("potentially readable", stderr)
 
     def test_attempts_command_reports_persisted_outcome_and_evidence(self) -> None:
         self.init_and_add()

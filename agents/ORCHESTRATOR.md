@@ -36,4 +36,4 @@ Implement auditable **development tooling**, not the product's Yocto runtime. Pr
 
 ## Later role additions (NOT KC-104)
 
-Claude CLI planner/reviewer adapters and Codex CLI implementation adapters belong to KC-105. Bounded auto-repair belongs to KC-106. Parallel process scheduling belongs to KC-107. Do not pull those into a foundation PR.
+Claude CLI planner/reviewer adapters and Codex CLI implementation adapters belong to KC-105. Bounded auto-repair belongs to KC-106. Supervised subscription authentication belongs to KC-107. Parallel process scheduling is deferred to the unassigned KC-108 roadmap placeholder. Do not pull those into a foundation PR.

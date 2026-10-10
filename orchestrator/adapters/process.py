@@ -53,6 +53,10 @@ _FORBIDDEN_ENVIRONMENT_NAMES = frozenset(
     {"GIT_ASKPASS", "SSH_ASKPASS", "SSH_AUTH_SOCK"}
 )
 
+_JSON_FIELD_REDACTION = re.compile(
+    r'(?i)("[^"\\]*(?:token|secret|password|api[_-]?key)[^"\\]*"\s*:\s*)'
+    r'"(?:\\.|[^"\\])*"'
+)
 _REDACTIONS = (
     re.compile(r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+"),
     re.compile(r"(?i)((?:api[_-]?key|password|secret|token)\s*[:=]\s*)[^\s,;]+"),
@@ -155,7 +159,7 @@ def resolve_executable(executable: str, environment: Mapping[str, str]) -> str:
 def redact_text(value: str) -> str:
     """Redact common credential forms before text reaches disk or previews."""
 
-    redacted = value
+    redacted = _JSON_FIELD_REDACTION.sub(r'\1"[redacted]"', value)
     for pattern in _REDACTIONS:
         if pattern.groups >= 3:
             redacted = pattern.sub(r"\1[redacted]:[redacted]@", redacted)

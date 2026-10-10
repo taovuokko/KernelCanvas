@@ -47,12 +47,19 @@ The locally installed Claude Codex MCP connection can remain available for **int
 - 3 repair rounds maximum, clear BLOCKED/FAILED states, no auto-approval or merge.
 - Reproducible handovers, attempt directories and structured evidence.
 
-### v3 — KC-107: two parallel implementers
+### Authentication hardening — KC-107: supervised subscription authentication
+
+- Opt-in Claude and Codex subscription profiles selected explicitly by the maintainer.
+- Provider-scoped profile path validation, private ownership/permission checks and no personal-default discovery.
+- Separate authorization and credential-exposure acknowledgement for real execution; see §6.
+
+### v3 — KC-108: two parallel implementers (roadmap placeholder)
 
 - At most two simultaneously running Codex workers plus one serialized independent reviewer initially.
 - Separate Git worktrees, Cargo target dirs, leases, locks and resource quotas.
 - Shared files/contracts assigned to exactly one active task at a time.
 - Crash recovery never launches a duplicate worker while the original process could still be alive.
+- KC-108 is deferred. This roadmap entry does not create or assign a GitHub issue.
 
 Do not implement future phases in KC-104 merely because they are described here.
 
@@ -96,6 +103,22 @@ GitHub tracking may be temporarily unreachable. Fail closed for *new unverified 
 - Use fresh Claude sessions for code review. Do not allow reviewer Edit/Bash/Agent/MCP tools in the automated path unless a narrow exception is approved.
 - A non-zero exit code, timeout, interrupted test, malformed JSON or missing report is not a successful phase.
 
+### Supervised live authentication constraint (KC-107)
+
+Claude and Codex subscription authentication may be enabled only by an explicit
+maintainer-selected profile below
+`~/.local/share/kernelcanvas/auth/{claude,codex}/<profile>`. Personal defaults such
+as `~/.claude` and `~/.codex` are never discovered or mounted. The selected path is
+canonicalized, confined to the provider directory, checked for private ownership
+and permissions, and mounted without binding host home or the root filesystem.
+
+The profile mount must be writable because the CLIs may update configuration and
+refresh tokens. Consequently, tools and agent-controlled shell commands inside the
+same sandbox may also be able to read those credentials. This is supervised mode,
+not complete credential isolation. It requires explicit real-execution
+authorization plus a separate acknowledgement of profile exposure. Regex/JSON log
+redaction reduces accidental persistence but is not an exfiltration boundary.
+
 ## 7. CLI contract: v0 design target
 
 ```console
@@ -112,4 +135,4 @@ python3 -m orchestrator history KC-104
 
 ## 8. Acceptance philosophy
 
-KC-104 counts as implemented only if its real CLI executes and its concurrency/state-transition tests pass. KC-105 counts only if mocked process tests and at least one opt-in, authorized real Claude/Codex smoke test run. KC-106 counts only with failed-test/review/fix/retry scenarios. KC-107 counts only after a controlled two-worker experiment proves disjoint files and safe completion. Every milestone has independent review and human-controlled merge.
+KC-104 counts as implemented only if its real CLI executes and its concurrency/state-transition tests pass. KC-105 counts only if mocked process tests and at least one opt-in, authorized real Claude/Codex smoke test run. KC-106 counts only with failed-test/review/fix/retry scenarios. KC-107 counts only when supervised subscription authentication enforces explicit profile selection, path and permission checks, authorization, exposure acknowledgement and redacted evidence. KC-108 counts only after a controlled two-worker experiment proves disjoint files and safe completion. Every milestone has independent review and human-controlled merge.

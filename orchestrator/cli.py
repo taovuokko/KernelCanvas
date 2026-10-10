@@ -104,6 +104,21 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--sandbox-executable", default="bwrap")
     run.add_argument("--codex-runtime-root", type=Path)
     run.add_argument("--claude-runtime-root", type=Path)
+    run.add_argument(
+        "--codex-auth-profile",
+        type=Path,
+        help="explicit profile under ~/.local/share/kernelcanvas/auth/codex/",
+    )
+    run.add_argument(
+        "--claude-auth-profile",
+        type=Path,
+        help="explicit profile under ~/.local/share/kernelcanvas/auth/claude/",
+    )
+    run.add_argument(
+        "--acknowledge-auth-profile-exposure",
+        action="store_true",
+        help="acknowledge that sandbox tools may read mounted auth profiles",
+    )
     run.add_argument("--authorize-real-execution", action="store_true")
     run.add_argument("--dry-run", action="store_true")
     return parser
@@ -120,10 +135,20 @@ def main(
     args = build_parser().parse_args(argv)
     if args.command == "run" and args.dry_run:
         checks = args.checks or ["orchestrator-tests", "orchestrator-help"]
+        profiles = ",".join(
+            provider
+            for provider, selected in (
+                ("codex", args.codex_auth_profile),
+                ("claude", args.claude_auth_profile),
+            )
+            if selected is not None
+        ) or "disabled"
+        profile_exposure = "false" if profiles == "disabled" else "true"
         print(
             f"dry-run task={args.task_id} branch={args.branch} "
             f"worktree={args.worktree} checks={','.join(checks)} "
-            "phases=implement,quality,review corrections<=2",
+            f"phases=implement,quality,review corrections<=2 auth-profiles={profiles} "
+            f"credentials-agent-readable={profile_exposure}",
             file=output,
         )
         return ExitCode.SUCCESS
@@ -254,6 +279,15 @@ def _run_command(
     elif args.command == "run":
         from .runloop import build_default_loop
 
+        if (
+            args.codex_auth_profile is not None
+            or args.claude_auth_profile is not None
+        ) and not args.acknowledge_auth_profile_exposure:
+            raise InvalidInputError(
+                "selected auth profiles are potentially readable by sandbox tools; "
+                "supervised use requires --acknowledge-auth-profile-exposure"
+            )
+
         loop = build_default_loop(
             connection,
             workspace_root=args.workspace_root,
@@ -262,6 +296,8 @@ def _run_command(
             sandbox_executable=args.sandbox_executable,
             codex_runtime_root=args.codex_runtime_root,
             claude_runtime_root=args.claude_runtime_root,
+            codex_auth_profile=args.codex_auth_profile,
+            claude_auth_profile=args.claude_auth_profile,
         )
         result = loop.run(
             args.task_id,

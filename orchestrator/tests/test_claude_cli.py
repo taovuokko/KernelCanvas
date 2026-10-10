@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from orchestrator.adapters.claude_cli import ClaudeCLI
+from orchestrator.adapters.claude_cli import ClaudeCLI, _system_mount_arguments
 from orchestrator.adapters.process import ProcessRunner
 from orchestrator.adapters.results import (
     CLIResult,
@@ -38,6 +38,14 @@ class ClaudeCLITests(unittest.TestCase):
             environment=environment,
         )
 
+    def auth_profile(self) -> Path:
+        auth_root = self.base / "kernelcanvas-auth"
+        profile = auth_root / "claude" / "supervised"
+        profile.mkdir(parents=True)
+        for directory in (auth_root, profile.parent, profile):
+            directory.chmod(0o700)
+        return profile
+
     def test_review_uses_os_read_only_and_tool_restrictions(self) -> None:
         record = self.base / "cli.json"
         bwrap_record = self.base / "bwrap.json"
@@ -57,6 +65,13 @@ class ClaudeCLITests(unittest.TestCase):
         self.assertEqual("review this diff", recorded["stdin"])
         self.assertIn("--permission-mode", recorded["argv"])
         self.assertIn("plan", recorded["argv"])
+        schema_index = recorded["argv"].index("--json-schema")
+        schema = json.loads(recorded["argv"][schema_index + 1])
+        self.assertEqual(
+            ["APPROVE", "REQUEST_CHANGES"],
+            schema["properties"]["verdict"]["enum"],
+        )
+        self.assertEqual(False, schema["additionalProperties"])
         self.assertIn("--tools", recorded["argv"])
         self.assertIn("Read", recorded["argv"])
         self.assertIn("mcp__*", " ".join(recorded["argv"]))
@@ -79,6 +94,18 @@ class ClaudeCLITests(unittest.TestCase):
             if value == "--ro-bind"
         }
         self.assertNotIn(str(Path.home()), read_only_sources)
+
+    def test_plan_does_not_require_reviewer_structured_output(self) -> None:
+        record = self.base / "plan-cli.json"
+        result = self.adapter(KC_FAKE_RECORD=str(record)).plan(
+            "plan this task",
+            cwd=self.worktree,
+            timeout_seconds=2,
+            log_dir=self.base / "plan-logs",
+        )
+        self.assertIsInstance(result, CLIResult)
+        recorded = json.loads(record.read_text(encoding="utf-8"))
+        self.assertNotIn("--json-schema", recorded["argv"])
 
     def test_cwd_outside_workspace_and_symlink_escape_are_rejected(self) -> None:
         outside = self.base.parent / f"{self.base.name}-outside"
@@ -122,6 +149,103 @@ class ClaudeCLITests(unittest.TestCase):
                 log_dir=log_dir,
                 dry_run=True,
             )
+
+    def test_explicit_auth_profile_is_writable_mounted_and_sets_claude_environment(self) -> None:
+        profile = self.auth_profile()
+        bwrap_record = self.base / "auth-bwrap.json"
+        with patch(
+            "orchestrator.adapters.auth.dedicated_auth_root",
+            return_value=profile.parents[1],
+        ):
+            result = ClaudeCLI(
+                self.base,
+                executable=str(FAKE_CLI),
+                sandbox_executable=str(FAKE_BWRAP),
+                runtime_root=FIXTURES,
+                auth_profile=profile,
+                environment={"KC_FAKE_BWRAP_RECORD": str(bwrap_record)},
+            ).review(
+                "prompt",
+                cwd=self.worktree,
+                timeout_seconds=2,
+                log_dir=self.base / "logs",
+            )
+        self.assertIsInstance(result, CLIResult)
+        assert isinstance(result, CLIResult)
+        self.assertTrue(result.succeeded, result.parse_error)
+        argv = json.loads(bwrap_record.read_text(encoding="utf-8"))
+        mount = argv.index(str(profile.resolve()))
+        self.assertEqual("--bind", argv[mount - 1])
+        self.assertEqual("/home/kernelcanvas/.claude", argv[mount + 1])
+        variable = argv.index("CLAUDE_CONFIG_DIR")
+        self.assertEqual("--setenv", argv[variable - 1])
+        self.assertEqual("/home/kernelcanvas/.claude", argv[variable + 1])
+
+    def test_default_does_not_select_host_claude_profile(self) -> None:
+        preview = self.adapter().review(
+            "prompt",
+            cwd=self.worktree,
+            timeout_seconds=2,
+            log_dir=self.base / "logs",
+            dry_run=True,
+        )
+        self.assertIsInstance(preview, InvocationPreview)
+        assert isinstance(preview, InvocationPreview)
+        self.assertNotIn("CLAUDE_CONFIG_DIR", preview.argv)
+        self.assertNotIn(str(Path.home() / ".claude"), preview.argv)
+
+    def test_system_mounts_preserve_verified_openssl_crypto_policy_link(self) -> None:
+        arguments = _system_mount_arguments()
+        config = Path("/etc/crypto-policies/back-ends/opensslcnf.config")
+        link = arguments.index(str(config))
+        self.assertEqual("--symlink", arguments[link - 2])
+        self.assertEqual(str(config.readlink()), arguments[link - 1])
+        self.assertTrue(config.resolve(strict=True).is_file())
+
+    def test_missing_openssl_crypto_policy_config_fails_before_launch(self) -> None:
+        missing = self.base / "missing-opensslcnf.config"
+        with patch(
+            "orchestrator.adapters.claude_cli._OPENSSL_CRYPTO_POLICY_CONFIG",
+            missing,
+        ), patch.object(ProcessRunner, "run") as run:
+            with self.assertRaisesRegex(
+                InvocationError, "crypto-policy configuration is unavailable"
+            ):
+                self.adapter().review(
+                    "prompt",
+                    cwd=self.worktree,
+                    timeout_seconds=2,
+                    log_dir=self.base / "logs",
+                )
+        run.assert_not_called()
+
+    def test_openssl_crypto_policy_symlink_outside_approved_root_fails_before_launch(
+        self,
+    ) -> None:
+        outside_target = self.base / "unapproved-opensslcnf.config"
+        outside_target.write_text("unapproved policy", encoding="utf-8")
+        config = self.base / "opensslcnf.config"
+        config.symlink_to(outside_target)
+        bwrap_record = self.base / "must-not-launch-bwrap.json"
+        log_dir = self.base / "must-not-create-logs"
+
+        with patch(
+            "orchestrator.adapters.claude_cli._OPENSSL_CRYPTO_POLICY_CONFIG",
+            config,
+        ), patch.object(ProcessRunner, "run") as run:
+            with self.assertRaisesRegex(
+                InvocationError, "outside approved system roots"
+            ):
+                self.adapter(KC_FAKE_BWRAP_RECORD=str(bwrap_record)).review(
+                    "prompt",
+                    cwd=self.worktree,
+                    timeout_seconds=2,
+                    log_dir=log_dir,
+                )
+
+        run.assert_not_called()
+        self.assertFalse(bwrap_record.exists())
+        self.assertFalse(log_dir.exists())
 
     def test_malformed_json_and_nonzero_exit_never_succeed(self) -> None:
         malformed = self.adapter(KC_FAKE_MODE="malformed").plan(

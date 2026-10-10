@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 from typing import Mapping
 
+from . import auth
 from .process import (
     ProcessOutput,
     ProcessRunner,
@@ -28,6 +29,26 @@ from .results import CLIResult, InvocationError, InvocationPreview, JSONValue
 _SANDBOX_WORKTREE = Path("/workspace")
 _SANDBOX_HOME = Path("/home/kernelcanvas")
 _SANDBOX_RUNTIME = Path("/run/kernelcanvas/claude-runtime")
+_SANDBOX_AUTH_PROFILE = _SANDBOX_HOME / ".claude"
+_OPENSSL_CRYPTO_POLICY_CONFIG = Path(
+    "/etc/crypto-policies/back-ends/opensslcnf.config"
+)
+_CRYPTO_POLICY_TARGET_ROOT = Path("/usr/share/crypto-policies")
+_REVIEW_JSON_SCHEMA = json.dumps(
+    {
+        "type": "object",
+        "properties": {
+            "verdict": {
+                "type": "string",
+                "enum": ["APPROVE", "REQUEST_CHANGES"],
+            },
+            "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
+        },
+        "required": ["verdict", "summary"],
+        "additionalProperties": False,
+    },
+    separators=(",", ":"),
+)
 _SYSTEM_ROOTS = (
     Path("/usr/bin"),
     Path("/usr/lib"),
@@ -64,6 +85,7 @@ class ClaudeCLI:
         executable: str = "claude",
         sandbox_executable: str = "bwrap",
         runtime_root: Path | None = None,
+        auth_profile: Path | None = None,
         runner: ProcessRunner | None = None,
         environment: Mapping[str, str] | None = None,
     ) -> None:
@@ -74,6 +96,11 @@ class ClaudeCLI:
         self.executable = executable
         self.sandbox_executable = sandbox_executable
         self.runtime_root = runtime_root
+        self.auth_profile = (
+            auth.resolve_auth_profile(auth_profile, provider="claude")
+            if auth_profile is not None
+            else None
+        )
         self.runner = runner or ProcessRunner()
         self.environment = build_safe_environment(environment)
 
@@ -88,6 +115,7 @@ class ClaudeCLI:
     ) -> CLIResult | InvocationPreview:
         return self._invoke(
             prompt,
+            json_schema=None,
             cwd=cwd,
             timeout_seconds=timeout_seconds,
             log_dir=log_dir,
@@ -105,6 +133,7 @@ class ClaudeCLI:
     ) -> CLIResult | InvocationPreview:
         return self._invoke(
             diff_context,
+            json_schema=_REVIEW_JSON_SCHEMA,
             cwd=cwd,
             timeout_seconds=timeout_seconds,
             log_dir=log_dir,
@@ -115,6 +144,7 @@ class ClaudeCLI:
         self,
         prompt: str,
         *,
+        json_schema: str | None,
         cwd: Path,
         timeout_seconds: float,
         log_dir: Path,
@@ -127,6 +157,11 @@ class ClaudeCLI:
             raise InvocationError(
                 f"working directory is outside configured workspace root: {resolved_cwd}"
             )
+        auth_profile = (
+            auth.resolve_auth_profile(self.auth_profile, provider="claude")
+            if self.auth_profile is not None
+            else None
+        )
 
         claude = Path(resolve_executable(self.executable, self.environment))
         bubblewrap = resolve_executable(self.sandbox_executable, self.environment)
@@ -151,6 +186,7 @@ class ClaudeCLI:
             "--setting-sources",
             "",
             "--strict-mcp-config",
+            *(("--json-schema", json_schema) if json_schema is not None else ()),
         )
         argv = (
             bubblewrap,
@@ -177,6 +213,7 @@ class ClaudeCLI:
             "--setenv",
             "XDG_CACHE_HOME",
             "/tmp/cache",
+            *_auth_profile_arguments(auth_profile),
             "--ro-bind",
             str(resolved_cwd),
             str(_SANDBOX_WORKTREE),
@@ -205,6 +242,19 @@ class ClaudeCLI:
         return _json_result(output)
 
 
+def _auth_profile_arguments(profile: Path | None) -> tuple[str, ...]:
+    if profile is None:
+        return ()
+    return (
+        "--bind",
+        str(profile),
+        str(_SANDBOX_AUTH_PROFILE),
+        "--setenv",
+        "CLAUDE_CONFIG_DIR",
+        str(_SANDBOX_AUTH_PROFILE),
+    )
+
+
 def _system_mount_arguments() -> tuple[str, ...]:
     """Return narrow host runtime mounts needed by native and Node CLIs."""
 
@@ -221,7 +271,41 @@ def _system_mount_arguments() -> tuple[str, ...]:
     for path in (*_SYSTEM_FILES, *_SYSTEM_DIRECTORIES):
         if path.exists():
             arguments.extend(("--ro-bind", str(path.resolve()), str(path)))
+    arguments.extend(_crypto_policy_mount_arguments())
     return tuple(arguments)
+
+
+def _crypto_policy_mount_arguments() -> tuple[str, ...]:
+    """Expose Fedora's OpenSSL policy link without broadening the sandbox."""
+
+    config = _OPENSSL_CRYPTO_POLICY_CONFIG
+    if not config.is_symlink():
+        raise InvocationError(
+            f"required OpenSSL crypto-policy configuration is unavailable: {config}"
+        )
+    try:
+        target = config.resolve(strict=True)
+        link_target = os.readlink(config)
+    except (OSError, RuntimeError) as error:
+        raise InvocationError(
+            f"required OpenSSL crypto-policy configuration is unavailable: {config}"
+        ) from error
+    if not target.is_file() or not target.is_relative_to(
+        _CRYPTO_POLICY_TARGET_ROOT
+    ):
+        raise InvocationError(
+            "required OpenSSL crypto-policy target is unavailable or outside "
+            f"approved system roots: {target}"
+        )
+    return (
+        "--dir",
+        "/etc/crypto-policies",
+        "--dir",
+        "/etc/crypto-policies/back-ends",
+        "--symlink",
+        link_target,
+        str(config),
+    )
 
 
 def _claude_runtime_mount(
